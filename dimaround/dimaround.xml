@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<wayfire>
+	<plugin name="dimaround">
+		<_short>Dim Around</_short>
+		<_long>Dims everything behind the focused floating window, similar to Hyprland's dimaround rule.</_long>
+		<category>Window Management</category>
+		<option name="opacity" type="double">
+			<_short>Dim opacity</_short>
+			<_long>Opacity of the black overlay drawn behind the focused floating window.</_long>
+			<default>0.5</default>
+			<min>0.0</min>
+			<max>1.0</max>
+			<precision>0.01</precision>
+		</option>
+		<option name="app_ids" type="string">
+			<_short>Application IDs</_short>
+			<_long>Space or comma separated list of app-ids for which the dimming applies. Use * for all floating windows.</_long>
+			<default>*</default>
+		</option>
+		<option name="disabled_during" type="string">
+			<_short>Disable while plugins active</_short>
+			<_long>Space or comma separated list of plugins (e.g. scale expo) during which the dimming is turned off.</_long>
+			<default>scale expo</default>
+		</option>
+	</plugin>
+</wayfire>

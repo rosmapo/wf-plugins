@@ -1,0 +1,1 @@
+meson setup build && meson install -C build
