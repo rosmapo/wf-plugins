@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<wayfire>
+    <plugin name="rounded-corners">
+        <_short>Rounded Corners</_short>
+        <_long>Rounds off the corners of application windows, similar to Hyprland's window rounding.</_long>
+        <category>Effects</category>
+
+        <option name="radius" type="int">
+            <_short>Corner radius</_short>
+            <_long>Radius, in logical pixels, used to round off window corners. Set to 0 to disable rounding.</_long>
+            <default>12</default>
+            <min>0</min>
+            <max>100</max>
+        </option>
+    </plugin>
+</wayfire>
