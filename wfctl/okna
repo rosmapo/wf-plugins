@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+
+import os
+import socket
+import struct
+import json
+
+socket_path = os.environ.get("WAYFIRE_SOCKET")
+
+if not socket_path:
+    raise SystemExit("WAYFIRE_SOCKET nie je nastavený")
+
+
+def wayfire_request(method, data={}):
+    request = {
+        "method": method,
+        "data": data
+    }
+
+    message = json.dumps(request).encode()
+    packet = struct.pack("<I", len(message)) + message
+
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.connect(socket_path)
+        s.sendall(packet)
+
+        header = s.recv(4)
+        length = struct.unpack("<I", header)[0]
+
+        response = b""
+        while len(response) < length:
+            response += s.recv(length - len(response))
+
+    return json.loads(response)
+
+
+# Informácie o workspace sete
+wsets = wayfire_request("window-rules/list-wsets")
+wset = wsets[0]
+
+workspace_info = wset["workspace"]
+grid_width = workspace_info["grid_width"]
+grid_height = workspace_info["grid_height"]
+
+# Aktuálny workspace
+current_x = workspace_info["x"]
+current_y = workspace_info["y"]
+
+# Informácie o výstupoch
+outputs = wayfire_request("window-rules/list-outputs")
+
+output = next(
+    (o for o in outputs if o["id"] == wset["output-id"]),
+    None
+)
+
+if output:
+    output_width = output["geometry"]["width"]
+    output_height = output["geometry"]["height"]
+else:
+    output_width = 1920
+    output_height = 1080
+
+
+# Informácie o oknách
+views = wayfire_request("window-rules/list-views")
+
+for v in views:
+    if v["type"] != "toplevel":
+        continue
+
+    geometry = v["geometry"]
+
+    # Globálna pozícia okna
+    gx = geometry["x"]
+    gy = geometry["y"]
+
+    # Pozícia workspace, na ktorom sa okno nachádza.
+    # Aktuálny workspace berieme ako referenciu.
+    workspace_x = current_x + round(gx / output_width)
+    workspace_y = current_y + round(gy / output_height)
+
+    # Ošetrenie hraníc 2×2 mriežky
+    workspace_x = max(0, min(grid_width - 1, workspace_x))
+    workspace_y = max(0, min(grid_height - 1, workspace_y))
+
+    # Tvoje číslovanie:
+    #
+    # 1 2
+    # 3 4
+    #
+    workspace_number = workspace_y * grid_width + workspace_x + 1
+
+    print("─" * 50)
+    print(f'ID:          {v["id"]}')
+    print(f'Aplikácia:   {v["app-id"]}')
+    print(f'Titulok:     {v["title"]}')
+    print(f'Typ:         {v["type"]}')
+    print(f'PID:         {v["pid"]}')
+    print(f'Stav:        mapped={v["mapped"]}, minimized={v["minimized"]}')
+    print(f'Aktívne:     {v["activated"]}')
+    print(f'Fullscreen:  {v["fullscreen"]}')
+    print(f'Sticky:      {v["sticky"]}')
+    print(f'Workspace:   {workspace_number} (x={workspace_x}, y={workspace_y})')
+    print(f'Layer:       {v["layer"]}')
+    print(f'Output:      {v["output-name"]} ({v["output-id"]})')
+    print(f'Pozícia:     x={gx}, y={gy}')
+    print(f'Veľkosť:     {geometry["width"]} × {geometry["height"]}')
+
