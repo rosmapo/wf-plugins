@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+
+import os
+import socket
+import struct
+import json
+import sys
+
+SOCKET_PATH = os.environ.get("WAYFIRE_SOCKET")
+
+if not SOCKET_PATH:
+    print("Chyba: WAYFIRE_SOCKET nie je nastavený.")
+    sys.exit(1)
+
+
+def request(method, data=None):
+    if data is None:
+        data = {}
+
+    message = json.dumps({
+        "method": method,
+        "data": data
+    }).encode()
+
+    packet = struct.pack("<I", len(message)) + message
+
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.connect(SOCKET_PATH)
+        sock.sendall(packet)
+
+        header = sock.recv(4)
+        if len(header) != 4:
+            raise RuntimeError("Wayfire nevrátil platnú odpoveď.")
+
+        length = struct.unpack("<I", header)[0]
+
+        response = b""
+        while len(response) < length:
+            chunk = sock.recv(length - len(response))
+            if not chunk:
+                raise RuntimeError("Wayfire prerušil spojenie.")
+            response += chunk
+
+    result = json.loads(response)
+
+    if "error" in result:
+        raise RuntimeError(result["error"])
+
+    return result
+
+
+try:
+    result = request("list-methods")
+
+    # Wayfire vracia {"methods": [...]}
+    methods = result.get("methods", [])
+
+except Exception as e:
+    print("Chyba:", e)
+    sys.exit(1)
+
+
+print("Wayfire IPC socket:")
+print(" ", SOCKET_PATH)
+print()
+
+print("Podporované metódy:")
+print("-------------------")
+
+for method in sorted(methods):
+    print(method)
+
+print()
+print("Počet metód:", len(methods))
+
+print()
+print("Metódy súvisiace s reload/config/rule:")
+print("--------------------------------------")
+
+keywords = ("reload", "config", "rule")
+
+found = False
+
+for method in sorted(methods):
+    if any(keyword in method.lower() for keyword in keywords):
+        print(method)
+        found = True
+
+if not found:
+    print("(žiadna)")
