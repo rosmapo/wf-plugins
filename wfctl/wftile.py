@@ -7,26 +7,12 @@ wftile.py           dlaždice: fokusované okno je hlavné
     3 okná: fokusované vľavo, ostatné vpravo hore a vpravo dole
     4 okná: fokusované vľavo hore, ostatné vľavo dole, vpravo hore, vpravo dole
 
-    Ak už sú okná v dlaždiciach (aj po stack alebo rotate), vráti ich do
-    pôvodných pozícií (grid/restore).
+    Opakované spustenie rovnakého príkazu (okná už sú v danom rozložení)
+    vráti okná do pôvodných pozícií (grid/restore).
 
-wftile.py stack     prepína medzi horizontálnym a vertikálnym rozložením (bez restore)
-    2 okná: vľavo/vpravo <-> hore/dole
-    3 okná: veľké vľavo + dve vpravo <-> veľké hore + dve pod ním
-    4 okná: mriežka 2x2 v oboch prípadoch (nič sa nemení)
-    Okná mimo dlaždíc sa rozložia vertikálne (fokusované hore).
-
+wftile.py stack     dlaždice "pod sebou" (alebo prepínanie medzi tile/stack)
 wftile.py rotate    posunie okná o jedno miesto v aktuálnom rozložení
-                    (2 okná = výmena, 3 a 4 okná = cyklus po smere hodín)
-
-wftile.py status    JSON pre Waybar: ikona podľa stavového súboru
-                    $XDG_RUNTIME_DIR/wftile.state, prázdny text, ak súbor neexistuje
-    Každá zmena rozloženia pošle Waybaru signál SIGRTMIN+8 (env WFTILE_SIGNAL).
-
-wftile.py watch     strážca (spúšťa sa sám pri dlaždicovaní): počúva udalosti Wayfiru
-                    a keď sa zatvorí niektoré z dlaždicových okien, ostatné okamžite
-                    vráti do pôvodných pozícií (restore), zmaže stav a pošle signál.
-                    Ladenie udalostí: WFTILE_DEBUG=1 (výpis do $XDG_RUNTIME_DIR/wftile.log)
+wftile.py watch     interný strážca: počúva udalosti a pri zatvorení okna urobí restore
 
 Voľby:  -n, --dry-run   iba vypíše, čo by urobil
 Cestu k wfctl možno zmeniť cez env WFCTL.
@@ -44,18 +30,11 @@ import sys
 WFCTL = os.environ.get("WFCTL", "wfctl")
 DRY_RUN = False
 
-# Stavový súbor (existuje, kým sú okná v dlaždiciach) a signál pre Waybar
+# Súbory pre stav a sledovanie procesu
 RUNTIME_DIR = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
 STATE_FILE = os.path.join(RUNTIME_DIR, "wftile.state")
 PID_FILE = os.path.join(RUNTIME_DIR, "wftile.pid")
 LOG_FILE = os.path.join(RUNTIME_DIR, "wftile.log")
-WAYBAR_SIGNAL = os.environ.get("WFTILE_SIGNAL", "8")  # musí sedieť s "signal" v Waybare
-
-ICONS = {"tile": "", "stack": ""}
-TOOLTIPS = {
-    "tile": "Okná v dlaždiciach (horizontálne)",
-    "stack": "Okná v dlaždiciach (vertikálne)",
-}
 
 # Rozloženia podľa režimu a počtu okien; prvý slot patrí hlavnému (fokusovanému) oknu
 LAYOUTS = {
@@ -168,7 +147,6 @@ def apply_slots(plan, focused_id):
         print(f"{vid:>5}  {view.get('app-id', '?'):<20} -> {slot}")
         if DRY_RUN:
             continue
-        # grid plugin berie id okna; posielame obe bežné názvy kľúča
         wfctl(f"grid/{slot}", f"id={vid}", f"view_id={vid}")
     if not DRY_RUN:
         wfctl("window-rules/focus-view", f"id={focused_id}", check=False)
@@ -182,13 +160,10 @@ def collect_workspace():
         sys.exit(1)
     output_id = out_info["id"]
 
-    # Ak chýba plná info o výstupe, dotiahneme ju
     if "geometry" not in out_info:
         out_info = unwrap(wfctl("window-rules/output-info", f"id={output_id}"), "info")
     out_geo = out_info["geometry"]
-    # Pohľad na aktívny workspace = obdĺžnik (0, 0, w, h) vo view súradniciach
     ws_rect = {"x": 0, "y": 0, "width": out_geo["width"], "height": out_geo["height"]}
-    # Použiteľná plocha (bez Waybaru), ak ju Wayfire vráti
     area = out_info.get("workarea") or ws_rect
 
     focused = unwrap(wfctl("window-rules/get-focused-view", check=False), "info")
@@ -222,7 +197,7 @@ def read_state():
             st = json.load(f)
     except (OSError, ValueError):
         return None
-    if isinstance(st, dict) and st.get("mode") in ICONS:
+    if isinstance(st, dict) and st.get("mode") in LAYOUTS:
         st.setdefault("ids", [])
         return st
     return None
@@ -232,16 +207,6 @@ def remove_state_file():
     try:
         os.remove(STATE_FILE)
     except OSError:
-        pass
-
-
-def notify_waybar():
-    try:
-        subprocess.run(
-            ["pkill", f"-RTMIN+{WAYBAR_SIGNAL}", "-x", "waybar"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-    except FileNotFoundError:
         pass
 
 
@@ -278,9 +243,7 @@ def stop_watcher():
 
 
 def set_state(mode, windows=None):
-    """Zapíše stav (mode + id okien) alebo ho zmaže (None); pošle Waybaru signál.
-
-    Pri zápise sa spustí strážca, pri zmazaní sa zastaví."""
+    """Zapíše stav (mode + id okien) alebo ho zmaže (None)."""
     if DRY_RUN:
         return
     if mode:
@@ -293,24 +256,9 @@ def set_state(mode, windows=None):
     else:
         remove_state_file()
         stop_watcher()
-    notify_waybar()
-
-
-def do_status():
-    """Výstup pre Waybar (JSON): ikona, ak existuje stavový súbor, inak prázdny text."""
-    st = read_state()
-    if st:
-        print(json.dumps({
-            "text": ICONS[st["mode"]],
-            "class": st["mode"],
-            "tooltip": TOOLTIPS[st["mode"]] + "\nĽavý klik: rotate, pravý klik: stack",
-        }, ensure_ascii=False))
-    else:
-        print(json.dumps({"text": "", "class": "none"}))
 
 
 def log(obj):
-    """Ladiaci výpis do $XDG_RUNTIME_DIR/wftile.log, ak je nastavené WFTILE_DEBUG."""
     if os.environ.get("WFTILE_DEBUG"):
         with open(LOG_FILE, "a") as f:
             f.write(json.dumps(obj, ensure_ascii=False) + "\n")
@@ -343,7 +291,7 @@ def do_watch():
     """Strážca: počúva udalosti Wayfiru; pri zatvorení dlaždicového okna urobí restore."""
     existing = watcher_pid()
     if existing and existing != os.getpid():
-        return  # už jeden beží
+        return
     with open(PID_FILE, "w") as f:
         f.write(str(os.getpid()))
 
@@ -364,14 +312,13 @@ def do_watch():
                 vid = (ev.get("view") or {}).get("id", ev.get("id"))
                 st = read_state()
                 if not st:
-                    break  # stav medzitým zrušený (restore)
+                    break
                 if vid in st["ids"]:
                     close_tiled(st, vid)
                     break
     except (KeyError, OSError, ValueError) as e:
         log({"watch-error": str(e)})
         remove_state_file()
-        notify_waybar()
     finally:
         if watcher_pid() == os.getpid():
             try:
@@ -397,7 +344,6 @@ def do_stack(windows, area, focused_id):
     for cur, other in (("tile", "stack"), ("stack", "tile")):
         ordered = assign_to_slots(windows, LAYOUTS[cur][count], area)
         if ordered:
-            # Zachová roly okien (hlavné okno ostane hlavné aj po rotate)
             apply_slots(list(zip(ordered, LAYOUTS[other][count])), focused_id)
             set_state(other, windows)
             return
@@ -408,7 +354,6 @@ def place(mode, windows, focused_id):
     """Rozloží okná z neusporiadaného stavu; fokusované je hlavné."""
     slots = LAYOUTS[mode][len(windows)]
     main = next(w for w in windows if w["id"] == focused_id)
-    # Ostatné zoradíme podľa aktuálnej polohy kvôli stabilite poradia
     if mode == "stack":
         key = lambda w: (w["geometry"]["x"], w["geometry"]["y"])
     else:
@@ -426,7 +371,6 @@ def do_rotate(windows, area, focused_id):
         slots = LAYOUTS[mode][count]
         ordered = assign_to_slots(windows, slots, area)
         if ordered:
-            # Posun po smere hodinových ručičiek (nie v poradí LAYOUTS)
             cycle = CLOCKWISE[(mode, count)]
             target = {s: cycle[(cycle.index(s) + 1) % count] for s in cycle}
             plan = [(w, target[s]) for w, s in zip(ordered, slots)]
@@ -444,7 +388,7 @@ def main():
         epilog="Opakované spustenie bez argumentu vráti okná do pôvodných pozícií.",
     )
     parser.add_argument(
-        "command", nargs="?", default="tile", choices=["tile", "stack", "rotate", "status", "watch"],
+        "command", nargs="?", default="tile", choices=["tile", "stack", "rotate", "watch"],
         help="tile (predvolené): dlaždice, opakovane = restore | "
              "stack: prepína horizontálne/vertikálne | rotate: posun okien",
     )
@@ -453,10 +397,6 @@ def main():
     args = parser.parse_args()
     DRY_RUN = args.dry_run
 
-    # status a watch nepotrebujú zoznam okien
-    if args.command == "status":
-        do_status()
-        return
     if args.command == "watch":
         do_watch()
         return
