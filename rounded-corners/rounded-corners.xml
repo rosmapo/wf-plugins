@@ -2,7 +2,7 @@
 <wayfire>
 	<plugin name="rounded-corners">
 		<_short>Rounded Corners</_short>
-		<_long>Antialiased rounded corners that clip the window itself, with soft shadows that follow the rounded outline.</_long>
+		<_long>Rounded window corners with an optional plain border and soft shadows that follow the rounded outline. Replaces the decoration plugin's frame, do not enable both.</_long>
 		<category>Effects</category>
 		<option name="radius" type="int">
 			<_short>Corner radius</_short>
@@ -11,41 +11,79 @@
 			<min>0</min>
 			<max>64</max>
 		</option>
-		<option name="shadow_radius" type="int">
-			<_short>Shadow radius</_short>
-			<_long>Blur radius of the shadow in pixels. 0 disables the shadow. Do not combine with another shadow plugin.</_long>
-			<default>20</default>
-			<min>0</min>
-			<max>128</max>
-		</option>
-		<option name="shadow_offset_x" type="int">
-			<_short>Shadow horizontal offset</_short>
-			<_long>Horizontal offset of the shadow in pixels.</_long>
-			<default>0</default>
-			<min>-64</min>
-			<max>64</max>
-		</option>
-		<option name="shadow_offset_y" type="int">
-			<_short>Shadow vertical offset</_short>
-			<_long>Vertical offset of the shadow in pixels.</_long>
-			<default>4</default>
-			<min>-64</min>
-			<max>64</max>
-		</option>
-		<option name="shadow_color" type="color">
-			<_short>Shadow color</_short>
-			<_long>Shadow color of the focused window.</_long>
-			<default>#000000A0</default>
-		</option>
-		<option name="inactive_shadow_color" type="color">
-			<_short>Inactive shadow color</_short>
-			<_long>Shadow color of unfocused windows.</_long>
-			<default>#00000060</default>
-		</option>
-		<option name="shadow_on_client_decorated" type="bool">
-			<_short>Shadow for client-decorated windows</_short>
-			<_long>Also draw the shadow under windows that draw their own decorations (usually they already have a shadow).</_long>
-			<default>false</default>
-		</option>
+		<group>
+			<_short>Border</_short>
+			<option name="border_enabled" type="bool">
+				<_short>Enable border</_short>
+				<_long>Draw a border around the window. It is painted outside of the window and follows the rounded corners.</_long>
+				<default>true</default>
+			</option>
+			<option name="border_size" type="int">
+				<_short>Border thickness</_short>
+				<_long>Thickness of the border in pixels.</_long>
+				<default>2</default>
+				<min>1</min>
+				<max>32</max>
+			</option>
+			<option name="active_border_color" type="color">
+				<_short>Active border color</_short>
+				<_long>Border color of the focused window.</_long>
+				<default>#89B4FAFF</default>
+			</option>
+			<option name="inactive_border_color" type="color">
+				<_short>Inactive border color</_short>
+				<_long>Border color of unfocused windows.</_long>
+				<default>#45475AFF</default>
+			</option>
+			<option name="border_on_client_decorated" type="bool">
+				<_short>Border for client-decorated windows</_short>
+				<_long>Also draw the border around windows that draw their own decorations (GTK, libadwaita...).</_long>
+				<default>false</default>
+			</option>
+		</group>
+		<group>
+			<_short>Shadow</_short>
+			<option name="shadow_enabled" type="bool">
+				<_short>Enable shadow</_short>
+				<_long>Draw a soft shadow around the window. Do not combine with another shadow plugin.</_long>
+				<default>true</default>
+			</option>
+			<option name="shadow_radius" type="int">
+				<_short>Shadow radius</_short>
+				<_long>Blur radius of the shadow in pixels.</_long>
+				<default>20</default>
+				<min>1</min>
+				<max>128</max>
+			</option>
+			<option name="shadow_offset_x" type="int">
+				<_short>Shadow horizontal offset</_short>
+				<_long>Horizontal offset of the shadow in pixels.</_long>
+				<default>0</default>
+				<min>-64</min>
+				<max>64</max>
+			</option>
+			<option name="shadow_offset_y" type="int">
+				<_short>Shadow vertical offset</_short>
+				<_long>Vertical offset of the shadow in pixels.</_long>
+				<default>4</default>
+				<min>-64</min>
+				<max>64</max>
+			</option>
+			<option name="shadow_color" type="color">
+				<_short>Shadow color</_short>
+				<_long>Shadow color of the focused window.</_long>
+				<default>#000000A0</default>
+			</option>
+			<option name="inactive_shadow_color" type="color">
+				<_short>Inactive shadow color</_short>
+				<_long>Shadow color of unfocused windows.</_long>
+				<default>#00000060</default>
+			</option>
+			<option name="shadow_on_client_decorated" type="bool">
+				<_short>Shadow for client-decorated windows</_short>
+				<_long>Also draw the shadow under windows that draw their own decorations (they usually already have one).</_long>
+				<default>false</default>
+			</option>
+		</group>
 	</plugin>
 </wayfire>
