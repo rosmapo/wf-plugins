@@ -1,4 +1,10 @@
 # wstroke
+meson build
+meson configure build --buildtype=release --strip
+meson configure build --buildtype=release --strip
+## alebo
+build-wstroke.sh deb
+
 
 Port of [Easystroke mouse gestures](https://github.com/thjaeger/easystroke) as a plugin for [Wayfire](https://github.com/WayfireWM/wayfire). Mouse gestures are shapes drawn on the screen while holding down one of the buttons (typically the right or middle button). This plugin allows associating such gestures with various actions. See the [Wiki](https://github.com/dkondor/wstroke/wiki) for more explanations and examples.
 

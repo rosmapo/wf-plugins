@@ -263,6 +263,9 @@ class wstroke : public wf::per_output_plugin_instance_t, public wf::pointer_inte
 		 * until then QAction shortcuts are rejected (wrong shortcut context). Plain
 		 * keys are not affected, but shortcuts are, so give the client time to finish. */
 		static constexpr uint32_t key_delay_ms = 50;
+		/* timer and delay (in ms) for the release of the replayed (right) click, see end_stroke() */
+		wf::wl_timer<false> click_timer;
+		static constexpr uint32_t click_hold_ms = 20;
 		
 		std::string config_dir;
 		std::string config_file;
@@ -772,11 +775,18 @@ class wstroke : public wf::per_output_plugin_instance_t, public wf::pointer_inte
 					check_focus_mouse_view();
 					const wf::buttonbinding_t& tmp = initiate;
 					auto t = wf::get_current_time();
+					const uint32_t btn = tmp.get_button();
 					output->rem_binding(&stroke_initiate);
-					input.pointer_button(t, tmp.get_button(), WLR_BUTTON_PRESSED);
-					input.pointer_button(t, tmp.get_button(), WLR_BUTTON_RELEASED);
-					output->add_button(initiate, &stroke_initiate);
+					input.pointer_button(t, btn, WLR_BUTTON_PRESSED);
 					view_unmapped.disconnect();
+					/* A real click is never released in the same millisecond. Clients
+					 * that react to the press (e.g. by opening a popup menu with a
+					 * grab) can get confused if the release comes with it, so keep the
+					 * button down for a short time like a real device would. */
+					click_timer.set_timeout(click_hold_ms, [this, btn] () {
+						input.pointer_button(wf::get_current_time(), btn, WLR_BUTTON_RELEASED);
+						output->add_button(initiate, &stroke_initiate);
+					});
 				});
 			}
 			ps.clear();

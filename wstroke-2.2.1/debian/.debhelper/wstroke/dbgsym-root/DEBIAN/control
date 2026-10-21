@@ -1,0 +1,12 @@
+Package: wstroke-dbgsym
+Source: wstroke
+Version: 2.2.1-1
+Auto-Built-Package: debug-symbols
+Architecture: amd64
+Maintainer: Daniel Kondor <kondor.dani@gmail.com>
+Installed-Size: 7179
+Depends: wstroke (= 2.2.1-1)
+Section: debug
+Priority: optional
+Description: debug symbols for wstroke
+Build-Ids: 249f601e618b007615823b84344e348541213ee4 4b8896d19a4e25d5465a1b7c961cc3f6b40511a6
