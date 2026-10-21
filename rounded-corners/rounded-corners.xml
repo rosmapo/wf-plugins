@@ -1,15 +1,51 @@
 <?xml version="1.0"?>
 <wayfire>
 	<plugin name="rounded-corners">
-		<_short>Rounded corners</_short>
-		<_long>Rounds the corners of toplevel windows and keeps the decoration plugin's border uniform along them.</_long>
+		<_short>Rounded Corners</_short>
+		<_long>Antialiased rounded corners that clip the window itself, with soft shadows that follow the rounded outline.</_long>
 		<category>Effects</category>
 		<option name="radius" type="int">
 			<_short>Corner radius</_short>
-			<_long>Radius of the rounded corners in pixels.</_long>
+			<_long>Radius of the rounded corners in pixels. 0 disables rounding.</_long>
 			<default>12</default>
 			<min>0</min>
 			<max>64</max>
+		</option>
+		<option name="shadow_radius" type="int">
+			<_short>Shadow radius</_short>
+			<_long>Blur radius of the shadow in pixels. 0 disables the shadow. Do not combine with another shadow plugin.</_long>
+			<default>20</default>
+			<min>0</min>
+			<max>128</max>
+		</option>
+		<option name="shadow_offset_x" type="int">
+			<_short>Shadow horizontal offset</_short>
+			<_long>Horizontal offset of the shadow in pixels.</_long>
+			<default>0</default>
+			<min>-64</min>
+			<max>64</max>
+		</option>
+		<option name="shadow_offset_y" type="int">
+			<_short>Shadow vertical offset</_short>
+			<_long>Vertical offset of the shadow in pixels.</_long>
+			<default>4</default>
+			<min>-64</min>
+			<max>64</max>
+		</option>
+		<option name="shadow_color" type="color">
+			<_short>Shadow color</_short>
+			<_long>Shadow color of the focused window.</_long>
+			<default>#000000A0</default>
+		</option>
+		<option name="inactive_shadow_color" type="color">
+			<_short>Inactive shadow color</_short>
+			<_long>Shadow color of unfocused windows.</_long>
+			<default>#00000060</default>
+		</option>
+		<option name="shadow_on_client_decorated" type="bool">
+			<_short>Shadow for client-decorated windows</_short>
+			<_long>Also draw the shadow under windows that draw their own decorations (usually they already have a shadow).</_long>
+			<default>false</default>
 		</option>
 	</plugin>
 </wayfire>

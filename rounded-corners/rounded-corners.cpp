@@ -1,40 +1,31 @@
 /*
- * rounded-corners — a Wayfire plugin that rounds off the corners of
- * toplevel windows, similar to how Hyprland's `decoration:rounding`
- * works (antialiased corner rounding applied as a post-process on the
- * window's own texture).
+ * rounded-corners — Wayfire plugin: antialiased rounded corners that clip the
+ * window itself (Hyprland-style `decoration:rounding`), plus soft shadows that
+ * follow the rounded outline.
  *
- * Targets: Wayfire 0.9.0 (as shipped in Debian 13 "trixie").
+ * Targets: Wayfire 0.9.0 (Debian 13 "trixie").
  *
- * Implementation notes (this is the scene-graph based transformer API,
- * not the older wf::view_transformer_t from pre-0.8 tutorials):
+ * The plugin is independent of the `decoration` plugin: it reads none of its
+ * options and draws no border. Whatever frame/titlebar another plugin gives
+ * the window is simply clipped together with the client.
  *
- *  - rounded_corners_node_t is a scene node (wf::scene::transformer_base_node_t)
- *    inserted into a view's transformer chain via
- *    view->get_transformed_node()->add_transformer(...).
- *  - It does not change the view's geometry at all, it only overrides
- *    get_bounding_box() (unchanged, passthrough) and generates a custom
- *    render_instance (rounded_corners_render_instance_t) that samples the
- *    view's own rendered texture through a small fragment shader which
- *    fades pixels to transparent outside a rounded-rectangle mask
- *    (antialiased with smoothstep, not a hard discard).
- *  - Fullscreen and maximized (TILED_EDGES_ALL) windows do not get
- *    rounded corners. The transformer is added/removed dynamically when
- *    those states change (view_fullscreen_signal / view_tiled_signal).
+ * How it works
+ * ------------
+ * A transformer node is inserted into the view's transformer chain. It renders
+ * the view into a temporary texture and redraws it through one fragment shader
+ * which
  *
- * Borders: when a window is decorated by Wayfire's `decoration` plugin
- * (border_size > 0), this plugin re-draws that border along the rounded
- * outline with a uniform thickness, using decoration/border_size and
- * decoration/active_color | inactive_color. Without this the square client
- * area would poke through the cut corners of the decoration frame. The ring
- * lies inside the window bounds, exactly where decoration draws its frame,
- * and it *replaces* the pixels there (no double-blending of translucent
- * colors).
+ *   1. cuts the four corners of the window rectangle (the toplevel geometry)
+ *      with an antialiased signed-distance mask; only the corner squares inside
+ *      the rectangle are touched, everything else passes through unchanged,
+ *   2. optionally draws a soft shadow *under* the window (never inside it) that
+ *      follows the same rounded outline.
  *
- * The rounding radius is exposed as the config option
- * `rounded-corners/radius`, described in rounded-corners.xml. That XML
- * file is what makes the option show up (with a slider) in WCM, and is
- * also what wayfire itself reads to know the option's type/default/range.
+ * The node's bounding box is enlarged by the shadow margin and damage is
+ * enlarged the same way. Transformers are removed in fini().
+ *
+ * Do not run another shadow plugin (wayfire-shadows) together with the shadow
+ * of this plugin; set shadow_radius = 0 if you prefer the other one.
  */
 
 #include <wayfire/view-transform.hpp>
@@ -47,10 +38,12 @@
 #include <wayfire/signal-definitions.hpp>
 #include <wayfire/per-output-plugin.hpp>
 #include <wayfire/option-wrapper.hpp>
+#include <wayfire/workspace-set.hpp>
 #include <wayfire/util/log.hpp>
 #include <wayfire/config/types.hpp>
 #include <glm/glm.hpp>
 #include <algorithm>
+#include <cstdlib>
 #include <memory>
 
 namespace
@@ -60,8 +53,8 @@ static const char *transformer_name = "rounded-corners";
 const std::string vertex_source =
     R"(
 #version 100
-attribute mediump vec2 position;
-varying mediump vec2 fposition;
+attribute highp vec2 position;
+varying highp vec2 fposition;
 
 uniform mat4 matrix;
 
@@ -71,81 +64,97 @@ void main() {
 }
 )";
 
-/* Fades the sampled pixel to transparent once it is further than
- * `radius` from a corner, with a 1px antialiased smoothstep band
- * instead of a hard cutoff (closer to how Hyprland's rounding looks). */
 const std::string frag_source =
     R"(
 #version 100
 @builtin_ext@
 
-varying mediump vec2 fposition;
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+
+varying highp vec2 fposition;
 @builtin@
 
-uniform mediump vec2 top_left;       // visible window rect (toplevel geometry)
-uniform mediump vec2 bottom_right;
-uniform mediump vec2 tex_top_left;   // rect covered by the texture (children bbox,
-uniform mediump vec2 tex_bottom_right; // may be larger: CSD shadows etc.)
-uniform mediump float radius;
-uniform mediump float aa;            // size of one device pixel in logical units
-uniform mediump float border_width;  // 0 = no border
-uniform mediump vec4 border_color;   // non-premultiplied rgba
+uniform vec2 top_left;         // window rectangle (toplevel geometry)
+uniform vec2 bottom_right;
+uniform vec2 tex_top_left;     // rectangle covered by the texture (children bbox)
+uniform vec2 tex_bottom_right;
+uniform float radius;
+uniform float aa;              // size of one device pixel in logical units
+uniform float shadow_radius;   // 0 = no shadow
+uniform vec2 shadow_offset;
+uniform vec4 shadow_color;     // non-premultiplied rgba
+
+// Signed distance to a rounded rectangle: < 0 inside, > 0 outside.
+float sdf_rrect(vec2 p, vec2 center, vec2 half_size, float r)
+{
+    vec2 q = abs(p - center) - half_size + vec2(r);
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
 
 void main()
 {
-    mediump vec2 half_size = (bottom_right - top_left) * 0.5;
-    mediump vec2 p = fposition - (top_left + half_size);
-    mediump float r = min(radius, min(half_size.x, half_size.y));
+    vec2 center    = (top_left + bottom_right) * 0.5;
+    vec2 half_size = (bottom_right - top_left) * 0.5;
+    float r = min(radius, min(half_size.x, half_size.y));
 
-    // Signed distance to the rounded rectangle: <0 inside, >0 outside.
-    mediump vec2 q = abs(p) - half_size + vec2(r);
-    mediump float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+    vec2 rel = abs(fposition - center);
+    bool inside = (rel.x <= half_size.x) && (rel.y <= half_size.y);
 
-    // ~1px antialiased edge.
-    mediump float mask = clamp(0.5 - d / aa, 0.0, 1.0);
+    float d = sdf_rrect(fposition, center, half_size, r);
 
+    // Window content (premultiplied). Transparent outside of the texture.
+    vec4 color = vec4(0.0);
     highp vec2 uv = (fposition - tex_top_left) / (tex_bottom_right - tex_top_left);
-    uv.y = 1.0 - uv.y;
-
-    mediump vec4 color = get_pixel(uv);
-
-    if (border_width > 0.0)
+    if (uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0)
     {
-        // 1 in the band [-border_width, 0] below the edge, 0 further inside.
-        mediump float cov = clamp((d + border_width) / aa + 0.5, 0.0, 1.0);
-        // Premultiplied border color. It REPLACES the content here (decoration
-        // draws the same color in the same place), so translucent colors are
-        // not blended twice.
-        mediump vec4 bc = vec4(border_color.rgb * border_color.a, border_color.a);
-        color = mix(color, bc, cov);
+        uv.y = 1.0 - uv.y;
+        color = get_pixel(uv);
     }
 
-    // Premultiplied-alpha-safe: scaling color+alpha together keeps
-    // blending correct against whatever is below.
-    gl_FragColor = color * mask;
+    // Coverage of the rounded window shape. Only meaningful inside the
+    // rectangle; outside of it the window does not exist at all.
+    float cov = inside ? clamp(0.5 - d / aa, 0.0, 1.0) : 0.0;
+
+    // Corner mask: applied only in the four corner squares inside the window
+    // rectangle. Straight edges and everything outside the rectangle are left
+    // exactly as rendered.
+    vec2 q = rel - half_size + vec2(r);
+    float m = (inside && q.x > 0.0 && q.y > 0.0) ? cov : 1.0;
+
+    vec4 result = color * m;
+
+    if (shadow_radius > 0.0)
+    {
+        float ds = sdf_rrect(fposition - shadow_offset, center, half_size, r);
+        float t = 1.0 - smoothstep(-shadow_radius, shadow_radius, ds);
+        t *= (1.0 - cov); // never draw the shadow under the window
+        vec4 sh = vec4(shadow_color.rgb * shadow_color.a, shadow_color.a) * t;
+        result = result + sh * (1.0 - result.a);
+    }
+
+    gl_FragColor = result;
 }
 )";
 
-// One option-wrapper instance for the whole plugin module; cheap to read
-// on every frame.
 wf::option_wrapper_t<int> o_radius{"rounded-corners/radius"};
+wf::option_wrapper_t<int> o_shadow_radius{"rounded-corners/shadow_radius"};
+wf::option_wrapper_t<int> o_shadow_x{"rounded-corners/shadow_offset_x"};
+wf::option_wrapper_t<int> o_shadow_y{"rounded-corners/shadow_offset_y"};
+wf::option_wrapper_t<wf::color_t> o_shadow_color{"rounded-corners/shadow_color"};
+wf::option_wrapper_t<wf::color_t> o_shadow_color_inactive{"rounded-corners/inactive_shadow_color"};
+wf::option_wrapper_t<bool> o_csd_shadow{"rounded-corners/shadow_on_client_decorated"};
 
-/* Options owned by the decoration plugin. Looked up lazily as raw option
- * objects so that a missing decoration plugin/metadata can't crash us. */
-template<class T>
-std::shared_ptr<wf::config::option_t<T>> find_option(const std::string& name)
-{
-    return std::dynamic_pointer_cast<wf::config::option_t<T>>(
-        wf::get_core().config.get_option(name));
-}
+/* Upper bound for how far a shadow can reach; used to damage generously when
+ * options change or the node goes away. */
+constexpr int MAX_DAMAGE_MARGIN = 512;
 }
 
 class rounded_corners_render_instance_t;
 
-/* The scene node itself. It has no children of its own -- its single
- * child is whatever was below it in the view's transformer chain
- * (either the next transformer, or the view's surface root node),
- * wired up automatically by transform_manager_node_t::add_transformer(). */
 class rounded_corners_node_t : public wf::scene::transformer_base_node_t
 {
   public:
@@ -154,10 +163,6 @@ class rounded_corners_node_t : public wf::scene::transformer_base_node_t
     explicit rounded_corners_node_t(wf::toplevel_view_interface_t *view) :
         wf::scene::transformer_base_node_t(false), view(view)
     {
-        deco_border_size    = find_option<int>("decoration/border_size");
-        deco_active_color   = find_option<wf::color_t>("decoration/active_color");
-        deco_inactive_color = find_option<wf::color_t>("decoration/inactive_color");
-
         OpenGL::render_begin();
         program.compile(vertex_source, frag_source);
         OpenGL::render_end();
@@ -175,29 +180,61 @@ class rounded_corners_node_t : public wf::scene::transformer_base_node_t
         return "rounded-corners";
     }
 
+    /* Shadows are drawn for server-side decorated windows; client-decorated
+     * windows usually bring their own shadow, so they only get ours when the
+     * user asks for it. */
+    bool shadow_enabled() const
+    {
+        if ((int)o_shadow_radius <= 0)
+        {
+            return false;
+        }
+
+        return (view && view->should_be_decorated()) || (bool)o_csd_shadow;
+    }
+
+    int get_margin() const
+    {
+        if (!shadow_enabled())
+        {
+            return 0;
+        }
+
+        int off = std::max(std::abs((int)o_shadow_x), std::abs((int)o_shadow_y));
+        return (int)o_shadow_radius + off;
+    }
+
     wf::geometry_t get_bounding_box() override
     {
-        // We do not change the view's geometry at all.
-        return get_children_bounding_box();
+        auto bb = get_children_bounding_box();
+        int m   = get_margin();
+        return {bb.x - m, bb.y - m, bb.width + 2 * m, bb.height + 2 * m};
+    }
+
+    /* Damage a generous area around the view. Used when options change or the
+     * node is about to be removed, because the old extent of the shadow is not
+     * known at that point. */
+    void damage_extended()
+    {
+        auto bb = get_children_bounding_box();
+        int m   = MAX_DAMAGE_MARGIN;
+        wf::scene::damage_node(shared_from_this(),
+            wf::geometry_t{bb.x - m, bb.y - m, bb.width + 2 * m, bb.height + 2 * m});
     }
 
     void gen_render_instances(std::vector<wf::scene::render_instance_uptr>& instances,
         wf::scene::damage_callback push_damage, wf::output_t *shown_on) override;
 
-    /* Does the actual GL work: samples src_tex (the view's rendered
-     * content) through the rounding shader and draws it into target,
-     * restricted to damage. Called by rounded_corners_render_instance_t. */
     void paint(const wf::render_target_t& target, const wf::region_t& damage,
         wf::texture_t src_tex)
     {
         /* The texture covers the bounding box of everything the view draws,
          * which can be bigger than the actual window (client-side shadows,
-         * invisible resize borders). The rounding and the border must follow
-         * the real window rectangle -- the toplevel geometry, which already
-         * includes the server-side decoration frame -- not the bbox. This is
-         * the same idea soreau/filters uses with its "margins" uniform. */
-        auto bbox = get_children_bounding_box();
-        wf::geometry_t geo = bbox;
+         * invisible resize borders). Rounding and shadow follow the
+         * real window rectangle: the toplevel geometry, which includes the
+         * server-side decoration frame. */
+        auto tex_box = get_children_bounding_box();
+        wf::geometry_t geo = tex_box;
         if (view)
         {
             auto vg = view->get_geometry();
@@ -207,7 +244,9 @@ class rounded_corners_node_t : public wf::scene::transformer_base_node_t
             }
         }
 
-        float x = bbox.x, y = bbox.y, w = bbox.width, h = bbox.height;
+        // The quad we draw covers the texture plus the shadow margin.
+        auto quad = get_bounding_box();
+        float x = quad.x, y = quad.y, w = quad.width, h = quad.height;
 
         OpenGL::render_begin(target);
 
@@ -223,25 +262,20 @@ class rounded_corners_node_t : public wf::scene::transformer_base_node_t
         program.attrib_pointer("position", 2, 0, vertex_data.data(), GL_FLOAT);
         program.uniform2f("top_left", geo.x, geo.y);
         program.uniform2f("bottom_right", geo.x + geo.width, geo.y + geo.height);
-        program.uniform2f("tex_top_left", x, y);
-        program.uniform2f("tex_bottom_right", x + w, y + h);
-        program.uniform1f("radius", (float)(int)o_radius);
+        program.uniform2f("tex_top_left", tex_box.x, tex_box.y);
+        program.uniform2f("tex_bottom_right",
+            tex_box.x + tex_box.width, tex_box.y + tex_box.height);
+        program.uniform1f("radius", (float)std::max(0, (int)o_radius));
         program.uniform1f("aa", 1.0f / target.scale);
 
-        // Border = the decoration plugin's frame, if this view is decorated.
-        float bw = 0.0f;
-        glm::vec4 bcol{0.0f};
-        if (view && view->should_be_decorated() && deco_border_size &&
-            deco_active_color && deco_inactive_color)
-        {
-            bw = (float)std::max(0, deco_border_size->get_value());
-            wf::color_t c = view->activated ?
-                deco_active_color->get_value() : deco_inactive_color->get_value();
-            bcol = glm::vec4(c.r, c.g, c.b, c.a);
-        }
+        // Shadow.
+        float sr = shadow_enabled() ? (float)(int)o_shadow_radius : 0.0f;
+        wf::color_t sc = view && view->activated ?
+            (wf::color_t)o_shadow_color : (wf::color_t)o_shadow_color_inactive;
+        program.uniform1f("shadow_radius", sr);
+        program.uniform2f("shadow_offset", (float)(int)o_shadow_x, (float)(int)o_shadow_y);
+        program.uniform4f("shadow_color", glm::vec4(sc.r, sc.g, sc.b, sc.a));
 
-        program.uniform1f("border_width", bw);
-        program.uniform4f("border_color", bcol);
         program.uniformMatrix4f("matrix", target.get_orthographic_projection());
 
         GL_CALL(glEnable(GL_BLEND));
@@ -262,9 +296,6 @@ class rounded_corners_node_t : public wf::scene::transformer_base_node_t
     OpenGL::program_t program;
     std::vector<GLfloat> vertex_data;
     wf::toplevel_view_interface_t *view;
-    std::shared_ptr<wf::config::option_t<int>> deco_border_size;
-    std::shared_ptr<wf::config::option_t<wf::color_t>> deco_active_color;
-    std::shared_ptr<wf::config::option_t<wf::color_t>> deco_inactive_color;
 };
 
 class rounded_corners_render_instance_t :
@@ -272,6 +303,17 @@ class rounded_corners_render_instance_t :
 {
   public:
     using wf::scene::transformer_render_instance_t<rounded_corners_node_t>::transformer_render_instance_t;
+
+    /* The shadow extends the area we draw to, so damage coming from the
+     * children has to grow by the same margin. */
+    void transform_damage_region(wf::region_t& damage) override
+    {
+        int m = self->get_margin();
+        if (m > 0)
+        {
+            damage.expand_edges(m);
+        }
+    }
 
     void render(const wf::render_target_t& target, const wf::region_t& damage) override
     {
@@ -288,13 +330,7 @@ void rounded_corners_node_t::gen_render_instances(
         std::make_unique<rounded_corners_render_instance_t>(this, push_damage, shown_on));
 }
 
-/* Plugin glue: attaches/detaches the node on view map/unmap, and forces a
- * repaint of every window when the radius option changes (e.g. from WCM),
- * so moving the slider updates the effect immediately.
- *
- * Rounded corners are NOT applied to fullscreen or maximized (fully tiled)
- * windows. The transformer is added/removed dynamically when those states
- * change. */
+/* Plugin glue. */
 class wayfire_rounded_corners_t : public wf::per_output_plugin_instance_t
 {
   public:
@@ -304,24 +340,49 @@ class wayfire_rounded_corners_t : public wf::per_output_plugin_instance_t
         output->connect(&on_view_fullscreen);
         output->connect(&on_view_tiled);
 
-        auto damage_all = [=] ()
-        {
-            for (auto& v : wf::get_core().get_all_views())
-            {
-                v->damage();
-            }
-        };
+        o_radius.set_callback(refresh_all_views);
+        o_shadow_radius.set_callback(refresh_all_views);
+        o_shadow_x.set_callback(refresh_all_views);
+        o_shadow_y.set_callback(refresh_all_views);
+        o_shadow_color.set_callback(refresh_all_views);
+        o_shadow_color_inactive.set_callback(refresh_all_views);
+        o_csd_shadow.set_callback(refresh_all_views);
 
-        o_radius.set_callback(damage_all);
+        // Windows that already exist when the plugin is loaded.
+        for (auto& v : output->wset()->get_views(wf::WSET_MAPPED_ONLY))
+        {
+            wayfire_view view = v;
+            view->connect(&on_view_unmapped);
+            view->connect(&on_view_activated);
+            update_transformer(view);
+        }
     }
 
     void fini() override
     {
-        // Transformer nodes are torn down together with each view's own
-        // scene-graph node, nothing to clean up here explicitly.
+        // The nodes contain code from this shared object; they must not
+        // outlive it.
+        for (auto& v : wf::get_core().get_all_views())
+        {
+            rem_transformer(v);
+        }
     }
 
   private:
+    /** Re-damage every view that carries our transformer. */
+    static void refresh_all_views()
+    {
+        for (auto& v : wf::get_core().get_all_views())
+        {
+            auto tr = v->get_transformed_node()->get_transformer<rounded_corners_node_t>(
+                transformer_name);
+            if (tr)
+            {
+                tr->damage_extended();
+            }
+        }
+    }
+
     /** True when the view should receive rounded corners. */
     static bool should_round(wayfire_view view)
     {
@@ -336,14 +397,12 @@ class wayfire_rounded_corners_t : public wf::per_output_plugin_instance_t
             return false;
         }
 
-        // Skip fullscreen windows.
         if (toplevel->pending_fullscreen())
         {
             return false;
         }
 
-        // Skip any tiled window (maximized, or snapped to a half/quarter
-        // of the screen via any single edge or combination of edges).
+        // Skip any tiled window (maximized, or snapped to an edge/corner).
         if (toplevel->pending_tiled_edges() != 0)
         {
             return false;
@@ -352,8 +411,7 @@ class wayfire_rounded_corners_t : public wf::per_output_plugin_instance_t
         return true;
     }
 
-    /** Add the rounded-corners transformer if it is not already present. */
-    void add_transformer(wayfire_view view)
+    static void add_transformer(wayfire_view view)
     {
         auto toplevel = wf::toplevel_cast(view);
         if (!toplevel)
@@ -361,7 +419,7 @@ class wayfire_rounded_corners_t : public wf::per_output_plugin_instance_t
             return;
         }
 
-        auto& tr_manager = view->get_transformed_node();
+        auto tr_manager = view->get_transformed_node();
         if (tr_manager->get_transformer(transformer_name))
         {
             return;
@@ -369,30 +427,31 @@ class wayfire_rounded_corners_t : public wf::per_output_plugin_instance_t
 
         auto tr = std::make_shared<rounded_corners_node_t>(toplevel.get());
         tr_manager->add_transformer(tr, wf::TRANSFORMER_2D - 1, transformer_name);
-        view->damage();
+        tr->damage_extended();
     }
 
-    /** Remove the rounded-corners transformer if it is present. */
-    void rem_transformer(wayfire_view view)
+    static void rem_transformer(wayfire_view view)
     {
-        auto& tr_manager = view->get_transformed_node();
-        if (!tr_manager->get_transformer(transformer_name))
+        auto tr_manager = view->get_transformed_node();
+        auto tr = tr_manager->get_transformer<rounded_corners_node_t>(transformer_name);
+        if (!tr)
         {
             return;
         }
 
+        // Repaint the area the shadow occupied, it is outside of the view's
+        // bounding box once the node is gone.
+        tr->damage_extended();
         tr_manager->rem_transformer(transformer_name);
         view->damage();
     }
 
-    /** Re-evaluate whether the view should have rounded corners and update. */
-    void update_transformer(wayfire_view view)
+    static void update_transformer(wayfire_view view)
     {
         if (should_round(view))
         {
             add_transformer(view);
-        }
-        else
+        } else
         {
             rem_transformer(view);
         }
@@ -402,8 +461,7 @@ class wayfire_rounded_corners_t : public wf::per_output_plugin_instance_t
     {
         auto view = ev->view;
 
-        // Only consider normal application windows -- skip panels,
-        // backgrounds, docks, etc.
+        // Only normal application windows, not panels, backgrounds, docks...
         if (view->role != wf::VIEW_ROLE_TOPLEVEL)
         {
             return;
@@ -414,10 +472,11 @@ class wayfire_rounded_corners_t : public wf::per_output_plugin_instance_t
         view->connect(&on_view_activated);
     };
 
-    // Focus changed: the border color depends on it, so repaint.
+    // Focus changed: the shadow colour depends on it.
     wf::signal::connection_t<wf::view_activated_state_signal> on_view_activated =
         [=] (wf::view_activated_state_signal *ev)
     {
+        // The view's bounding box already includes the shadow margin.
         ev->view->damage();
     };
 
