@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""Small command-line client for the Wayfire IPC socket."""
+
+import json
+import os
+import socket
+import struct
+import sys
+
+VERSION = "1.1"
+SOCKET_PATH = os.environ.get("WAYFIRE_SOCKET")
+
+
+def recv_exact(sock, size):
+    """Read exactly size bytes, even when recv() returns partial data."""
+    chunks = []
+    remaining = size
+    while remaining:
+        chunk = sock.recv(remaining)
+        if not chunk:
+            raise RuntimeError("Wayfire prerušil spojenie počas odpovede.")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def wayfire_request(method, data=None):
+    if not SOCKET_PATH:
+        raise RuntimeError("WAYFIRE_SOCKET nie je nastavený.")
+
+    if data is None:
+        data = {}
+
+    message = json.dumps(
+        {"method": method, "data": data},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    packet = struct.pack("<I", len(message)) + message
+
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.connect(SOCKET_PATH)
+        sock.sendall(packet)
+        length = struct.unpack("<I", recv_exact(sock, 4))[0]
+        if length > 64 * 1024 * 1024:
+            raise RuntimeError(f"Neprimerane veľká odpoveď Wayfiru: {length} bajtov.")
+        response = recv_exact(sock, length)
+
+    try:
+        result = json.loads(response.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Wayfire vrátil neplatný JSON: {exc}") from exc
+
+    if isinstance(result, dict) and "error" in result:
+        raise RuntimeError(f"Chyba od Wayfiru: {result['error']}")
+    return result
+
+
+def parse_value(value):
+    """Parse JSON literals/containers, otherwise preserve the value as text."""
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return value
+
+
+def get_methods():
+    result = wayfire_request("list-methods")
+    methods = result.get("methods", []) if isinstance(result, dict) else []
+    return sorted(methods)
+
+
+def print_methods():
+    methods = get_methods()
+    print(f"Dostupné IPC metódy ({len(methods)}):")
+    for method in methods:
+        print(f"  {method}")
+
+
+def print_help():
+    print(f"""wfctl {VERSION} – jednoduchý klient Wayfire IPC
+
+Použitie:
+  wfctl <metóda> [kluc=hodnota ...]
+  wfctl --methods              vypíše metódy dostupné v práve spustenom Wayfire
+  wfctl --help                 zobrazí túto nápovedu a dostupné metódy
+
+Príklady:
+  wfctl list-methods
+  wfctl window-rules/list-views
+  wfctl window-rules/get-focused-view
+  wfctl window-rules/focus-view id=15
+  wfctl window-rules/configure-view id=15 x=100 y=100 width=800 height=600
+  wfctl wm-actions/set-fullscreen id=15 fullscreen=true
+  wfctl wm-actions/set-always-on-top id=15 above=true
+  wfctl grid/slot_t id=15
+  wfctl vswitch/set-workspace x=1 y=0
+  wfctl input/list-devices
+  wfctl input/configure-device ...
+  wfctl wayfire/get-keyboard-state
+  wfctl wayfire/set-keyboard-state layout-index=1
+  wfctl wayfire/list-config-options
+  wfctl wayfire/get-config-option option=core/opacity_inactive
+  wfctl wayfire/reload-config-metadata
+  wfctl wayfire/reload-plugins
+  wfctl window-rules/get_cursor_position
+  wfctl wayfire/create-headless-output width=1920 height=1080
+  wfctl window-rules/events/watch
+
+Argumenty hodnot:
+  true, false, null, čísla, JSON polia a objekty sa automaticky prevedú
+  na príslušné dátové typy. Ostatné hodnoty zostanú reťazcami.
+
+Socket:
+  Používa premennú WAYFIRE_SOCKET, napr.:
+  WAYFIRE_SOCKET=/tmp/wayfire-wayland-1.socket wfctl list-methods
+
+Poznámka: zoznam metód sa zisťuje priamo z bežiaceho Wayfiru. Dostupnosť
+metód závisí od verzie a od načítaných pluginov.
+""")
+    try:
+        print_methods()
+    except Exception as exc:
+        print(f"\nAktuálny zoznam IPC metód sa nedá načítať: {exc}", file=sys.stderr)
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        print_help()
+        return 0
+    if argv[0] in ("-m", "--methods"):
+        print_methods()
+        return 0
+    if argv[0] in ("-V", "--version"):
+        print(f"wfctl {VERSION}")
+        return 0
+
+    method = argv[0]
+    data = {}
+    for arg in argv[1:]:
+        if "=" not in arg:
+            print(f"Varovanie: ignorujem neplatný argument '{arg}' (očakávam kluc=hodnota).", file=sys.stderr)
+            continue
+        key, value = arg.split("=", 1)
+        if not key:
+            print(f"Varovanie: ignorujem argument s prázdnym kľúčom: '{arg}'.", file=sys.stderr)
+            continue
+        data[key] = parse_value(value)
+
+    result = wayfire_request(method, data)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except (OSError, RuntimeError) as exc:
+        print(f"wfctl: {exc}", file=sys.stderr)
+        sys.exit(1)

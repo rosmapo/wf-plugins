@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<wayfire>
+    <plugin name="xkill">
+        <_short>Kill window (xkill)</_short>
+        <_long>Turns the cursor into a crosshair. The next left click on a window force-kills the client that owns it, similar to the X11 `xkill` utility. Right click or Escape cancels without killing anything.</_long>
+        <category>Utility</category>
+        <option name="activate" type="key">
+            <_short>Activate</_short>
+            <_long>Starts crosshair mode. Left-click a window to kill it; right-click or Escape cancels.</_long>
+            <default>&lt;ctrl&gt; &lt;alt&gt; KEY_ESC</default>
+        </option>
+    </plugin>
+</wayfire>
